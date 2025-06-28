@@ -1,13 +1,86 @@
 <!DOCTYPE html>
-<html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Vite + React</title>
-  </head>
-  <body>
-    <div id="root"></div>
-    <script type="module" src="/src/main.jsx"></script>
-  </body>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Clon Básico de Doramasflix</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <header>
+        <div class="logo">
+            <!-- El logo SVG/PNG se puede añadir después o dejar como texto -->
+            <h1>Doramasflix</h1>
+        </div>
+        <nav class="main-nav">
+            <ul>
+                <li><a href="#">Doramas</a></li>
+                <li><a href="#">Películas</a></li>
+                <li><a href="#">Variedades</a></li>
+                <li><a href="#">Calendario</a></li>
+            </ul>
+        </nav>
+        <div class="user-actions">
+            <button>Iniciar</button>
+        </div>
+    </header>
+
+    <main>
+        <aside class="filters">
+            <section class="filter-group">
+                <h2>Etiquetas</h2>
+                <!-- Enlaces de ejemplo, sin funcionalidad real -->
+                <ul>
+                    <li><a href="#">Acción</a></li>
+                    <li><a href="#">Romance</a></li>
+                    <li><a href="#">Comedia</a></li>
+                    <li><a href="#">Ver más</a></li>
+                </ul>
+            </section>
+            <section class="filter-group">
+                <h2>Géneros</h2>
+                <ul>
+                    <li><a href="#">Drama</a></li>
+                    <li><a href="#">Fantasía</a></li>
+                    <li><a href="#">Escolar</a></li>
+                    <li><a href="#">Ver más</a></li>
+                </ul>
+            </section>
+            <section class="filter-group">
+                <h2>Países</h2>
+                 <ul>
+                    <li><a href="#">Corea del Sur</a></li>
+                    <li><a href="#">Japón</a></li>
+                    <li><a href="#">China</a></li>
+                    <li><a href="#">Tailandia</a></li>
+                </ul>
+            </section>
+            <section class="filter-group">
+                <h2>Productora</h2>
+                <ul>
+                    <li><a href="#">tvN</a></li>
+                    <li><a href="#">JTBC</a></li>
+                    <li><a href="#">SBS</a></li>
+                    <li><a href="#">Ver más</a></li>
+                </ul>
+            </section>
+        </aside>
+
+        <section class="content-area">
+            <h2>Contenido Principal</h2>
+            <!-- Aquí irían las tarjetas de doramas/películas -->
+            <p>El contenido (series, películas) se mostraría aquí.</p>
+        </section>
+    </main>
+
+    <footer>
+        <div class="footer-links">
+            <a href="#">DCMA</a>
+            <a href="#">Política de Cookies</a>
+            <a href="#">Preguntas frecuentes</a>
+            <a href="#">Términos y condiciones</a>
+        </div>
+        <p>&copy; 2023 Mi Clon de Doramasflix</p>
+    </footer>
+</body>
 </html>

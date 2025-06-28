@@ -1,0 +1,134 @@
+/* Estilos generales */
+body {
+    font-family: sans-serif;
+    margin: 0;
+    padding: 0;
+    background-color: #141414; /* Color de fondo oscuro similar a Doramasflix */
+    color: #fff; /* Texto blanco */
+}
+
+a {
+    color: #e50914; /* Rojo característico para enlaces */
+    text-decoration: none;
+}
+
+a:hover {
+    text-decoration: underline;
+}
+
+/* Encabezado */
+header {
+    background-color: #181818; /* Un poco más claro que el fondo */
+    padding: 10px 20px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border-bottom: 1px solid #303030;
+}
+
+.logo h1 {
+    margin: 0;
+    font-size: 1.8em;
+    color: #e50914; /* Rojo característico */
+}
+
+.main-nav ul {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    display: flex;
+}
+
+.main-nav ul li {
+    margin-left: 20px;
+}
+
+.main-nav ul li a {
+    color: #fff;
+    font-weight: bold;
+}
+
+.user-actions button {
+    background-color: #e50914;
+    color: white;
+    border: none;
+    padding: 8px 15px;
+    cursor: pointer;
+    font-weight: bold;
+    border-radius: 3px;
+}
+
+/* Contenido Principal */
+main {
+    display: flex;
+    padding: 20px;
+}
+
+/* Filtros Laterales */
+.filters {
+    width: 200px; /* Ancho fijo para la barra de filtros */
+    margin-right: 20px;
+    padding-right: 20px;
+    border-right: 1px solid #303030;
+}
+
+.filter-group {
+    margin-bottom: 20px;
+}
+
+.filter-group h2 {
+    font-size: 1.2em;
+    color: #fff;
+    margin-bottom: 10px;
+    border-bottom: 1px solid #444;
+    padding-bottom: 5px;
+}
+
+.filter-group ul {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+}
+
+.filter-group ul li a {
+    color: #ccc; /* Un color más suave para los enlaces de filtro */
+    display: block;
+    padding: 5px 0;
+}
+
+.filter-group ul li a:hover {
+    color: #fff;
+}
+
+/* Área de Contenido */
+.content-area {
+    flex-grow: 1; /* El área de contenido ocupa el espacio restante */
+}
+
+.content-area h2 {
+    font-size: 1.5em;
+    margin-bottom: 15px;
+}
+
+/* Pie de página */
+footer {
+    background-color: #181818;
+    text-align: center;
+    padding: 20px;
+    border-top: 1px solid #303030;
+    font-size: 0.9em;
+}
+
+.footer-links a {
+    margin: 0 10px;
+    color: #ccc;
+}
+
+.footer-links a:hover {
+    color: #fff;
+}
+
+footer p {
+    margin-top: 10px;
+    color: #777;
+}
