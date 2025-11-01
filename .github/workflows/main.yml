@@ -1,5 +1,7 @@
-name: expose-rdp-via-cloudflared
-on: [workflow_dispatch]
+name: Expose RDP via Cloudflared (TCP)
+
+on:
+  workflow_dispatch:
 
 jobs:
   expose-rdp:
@@ -10,47 +12,136 @@ jobs:
       - name: Enable RDP and firewall
         shell: powershell
         run: |
+          Write-Host "Habilitando Remote Desktop..."
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name 'fDenyTSConnections' -Value 0 -Force
+          # opcional: deshabilitar NLA si necesitas (comentar si no quieres)
+          # Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
           Restart-Service -Name TermService -Force
+
+          Write-Host "Añadiendo regla de firewall para RDP (puerto 3389)..."
+          netsh advfirewall firewall delete rule name="Allow-RDP-Local" > $null 2>&1
           netsh advfirewall firewall add rule name="Allow-RDP-Local" dir=in action=allow protocol=TCP localport=3389
 
-      - name: Install cloudflared
+      - name: Create local RDP user (optional) and show users
         shell: powershell
         run: |
-          $exe = Join-Path $env:ProgramFiles "cloudflared\cloudflared.exe"
-          New-Item -ItemType Directory -Force -Path (Split-Path $exe) | Out-Null
-          Invoke-WebRequest "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe" -OutFile $exe -UseBasicParsing
+          # Si ya tienes usuario, puedes comentar la creación. Aquí creamos usuario 'rdpuser' con password aleatoria.
+          $username = "rdpuser"
+          Add-Type -AssemblyName System.Security
+          $chars = ([char[]](65..90) + [char[]](97..122) + [char[]](48..57) + [char[]](33..47) + [char[]](58..64) + [char[]](91..96) + [char[]](123..126))
+          $pw = -join ((1..16) | ForEach-Object { $chars | Get-Random -Count 1 })
+          $securePw = ConvertTo-SecureString $pw -AsPlainText -Force
+          if (Get-LocalUser -Name $username -ErrorAction SilentlyContinue) {
+            Set-LocalUser -Name $username -Password $securePw
+            Write-Host "Usuario existente actualizada: $username"
+          } else {
+            New-LocalUser -Name $username -Password $securePw -AccountNeverExpires
+            Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username -ErrorAction SilentlyContinue
+            Add-LocalGroupMember -Group "Administrators" -Member $username -ErrorAction SilentlyContinue
+            Write-Host "Usuario creado: $username"
+          }
+          # Guardar credenciales en GITHUB_ENV (ten cuidado con logs)
+          Add-Content -Path $env:GITHUB_ENV -Value ("RDP_USER=" + $username)
+          Add-Content -Path $env:GITHUB_ENV -Value ("RDP_PASS=" + $pw)
+          Write-Host "Se guardaron RDP_USER y RDP_PASS en GITHUB_ENV (visible en pasos del mismo workflow)."
 
-      - name: Launch cloudflared TCP tunnel to RDP
+      - name: Install cloudflared (download)
         shell: powershell
         run: |
-          $exe = Join-Path $env:ProgramFiles "cloudflared\cloudflared.exe"
+          $exeDir = Join-Path $env:ProgramFiles "cloudflared"
+          New-Item -ItemType Directory -Force -Path $exeDir | Out-Null
+          $exePath = Join-Path $exeDir "cloudflared.exe"
+          Write-Host "Descargando cloudflared..."
+          Invoke-WebRequest -Uri "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe" -OutFile $exePath -UseBasicParsing -ErrorAction Stop
+          if (-not (Test-Path $exePath)) { Write-Error "No se pudo descargar cloudflared"; exit 1 }
+          Write-Host "cloudflared instalado en: $exePath"
+          Add-Content -Path $env:GITHUB_ENV -Value ("CLOUDFLARED_EXE=" + $exePath)
+
+      - name: Launch cloudflared TCP tunnel to RDP (background job)
+        id: launch-tunnel
+        shell: powershell
+        run: |
+          $exe = $env:CLOUDFLARED_EXE
+          if (-not $exe -or -not (Test-Path $exe)) { Write-Error "cloudflared no encontrado en $exe"; exit 1 }
+
           $log = Join-Path $env:TEMP "cloudflared-rdp.log"
-          # Ejecutar en background con Start-Job y volcar salida a logfile
-          Start-Job -Name cf-rdp -ScriptBlock {
+          if (Test-Path $log) { Remove-Item $log -Force -ErrorAction SilentlyContinue }
+
+          Write-Host "Lanzando cloudflared tunnel (tcp://localhost:3389) en background..."
+          Start-Job -Name "cf-rdp" -ScriptBlock {
             param($exePath,$logPath)
             & $exePath tunnel --url "tcp://localhost:3389" *>&1 | Out-File -FilePath $logPath -Encoding utf8 -Append
           } -ArgumentList $exe,$log | Out-Null
 
-          # Esperar y buscar hostname público (puede tardar)
+          Write-Host "Esperando la URL pública (.trycloudflare.com). Esto puede tardar hasta 2 minutos..."
           $public = $null
-          for ($i=0; $i -lt 60; $i++) {
+          $tries = 60
+          for ($i = 0; $i -lt $tries; $i++) {
             if (Test-Path $log) {
               $txt = Get-Content $log -Raw -ErrorAction SilentlyContinue
-              $m = [regex]::Match($txt, '(tcp:\/\/[^\s]+|https?:\/\/[^\s]+)', 'IgnoreCase')
-              if ($m.Success) { $public = $m.Groups[0].Value; break }
+              if ($txt) {
+                # Buscar específicamente trycloudflare.com
+                $m = [regex]::Matches($txt, '(https?:\/\/[A-Za-z0-9\-]+\.trycloudflare\.com(?:\:\d+)?)', 'IgnoreCase')
+                if ($m.Count -gt 0) {
+                  # tomar la última aparición válida (por si aparece sitio docs/terms antes)
+                  for ($j = $m.Count - 1; $j -ge 0; $j--) {
+                    $cand = $m[$j].Value.Trim()
+                    if ($cand -notmatch 'cloudflare\.com\/(website-terms|docs|privacy|legal)') {
+                      $public = $cand
+                      break
+                    }
+                  }
+                  if ($public) { break }
+                }
+                # fallback: en algunos casos cloudflared imprime tcp:// host:port
+                if (-not $public) {
+                  $m2 = [regex]::Match($txt, '(tcp:\/\/[^\s]+)', 'IgnoreCase')
+                  if ($m2.Success) { $public = $m2.Value.Trim(); break }
+                }
+              }
             }
             Start-Sleep -Seconds 2
           }
-          if (-not $public) { Write-Error "No public endpoint found in cloudflared log"; exit 1 }
+
+          if (-not $public) {
+            Write-Host "No se detectó endpoint público en el log de cloudflared. Últimas líneas del log:"
+            if (Test-Path $log) { Get-Content $log -Tail 200 } else { Write-Host "No hay log aún." }
+            Write-Error "Fallo al obtener endpoint público del túnel."
+            exit 1
+          }
+
           Write-Host "PUBLIC_ENDPOINT=$public"
           Add-Content -Path $env:GITHUB_ENV -Value ("PUBLIC_ENDPOINT=" + $public)
 
-      - name: Keep alive
+      - name: Verify local RDP listener
         shell: powershell
         run: |
-          Write-Host "Tunnel active at $env:PUBLIC_ENDPOINT"
+          Write-Host "Comprobando que RDP escucha en localhost:3389..."
+          $t = Test-NetConnection -ComputerName localhost -Port 3389 -WarningAction SilentlyContinue
+          if ($t.TcpTestSucceeded) {
+            Write-Host "RDP local escuchando correctamente."
+          } else {
+            Write-Warning "RDP local no parece escuchar en 3389. Comprueba que el servicio TermService esté activo."
+          }
+
+      - name: Show connection info (IMPORTANT)
+        shell: powershell
+        run: |
+          Write-Host "========================================"
+          Write-Host "PUBLIC_ENDPOINT: $env:PUBLIC_ENDPOINT"
+          Write-Host "Usa un cliente RDP (mstsc) para conectar:"
+          Write-Host "  Host: $env:PUBLIC_ENDPOINT"
+          Write-Host "  Usuario: $env:RDP_USER"
+          Write-Host "  Password: $env:RDP_PASS"
+          Write-Host "NOTA: Si el PUBLIC_ENDPOINT tiene formato tcp://host:port, usa host:port en el cliente RDP."
+          Write-Host "Cuando termines cancela el workflow para cerrar el túnel."
+          Write-Host "========================================"
+
+      - name: Keep tunnel alive
+        shell: powershell
+        run: |
+          Write-Host "Manteniendo el workflow activo para que el túnel siga vivo. Cancelar workflow para cerrar."
           while ($true) {
             Start-Sleep -Seconds 300
-            Write-Host "Still running..."
+            Write-Host "$(Get-Date -Format o) - tunnel still running at $env:PUBLIC_ENDPOINT"
           }
