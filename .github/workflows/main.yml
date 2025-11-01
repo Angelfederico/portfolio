@@ -1,57 +1,65 @@
-name: RDP via Cloudflare Tunnel
+name: HTTP via Cloudflare Tunnel
 
 on:
   workflow_dispatch:
 
 jobs:
-  secure-rdp-cloudflare:
+  http-cloudflare:
     runs-on: windows-latest
-    timeout-minutes: 3600
+    timeout-minutes: 360
 
     steps:
-      - name: Configure Core RDP Settings
+      - name: Prepare simple web content
         shell: powershell
         run: |
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
-          netsh advfirewall firewall delete rule name="RDP-Cloudflare" -ErrorAction SilentlyContinue
-          netsh advfirewall firewall add rule name="RDP-Cloudflare" dir=in action=allow protocol=TCP localport=3389
-          Restart-Service -Name TermService -Force
+          $www = Join-Path $env:TEMP "cf-http-site"
+          if (Test-Path $www) { Remove-Item -Recurse -Force $www }
+          New-Item -ItemType Directory -Path $www | Out-Null
+          $index = Join-Path $www "index.html"
+          @"
+          <!doctype html>
+          <html>
+          <head><meta charset='utf-8'><title>Cloudflared Test</title></head>
+          <body>
+            <h1>Servidor HTTP local expuesto por Cloudflare Tunnel</h1>
+            <p>Instancia de prueba en el runner GitHub Actions.</p>
+            <p>Timestamp: $(Get-Date -Format o)</p>
+          </body>
+          </html>
+          "@ | Out-File -FilePath $index -Encoding utf8
 
-      - name: Create RDP User with Secure Password
+          Write-Host "Web content created at $www"
+          # Guardamos la ruta para el siguiente paso
+          Add-Content -Path $env:GITHUB_ENV -Value ("WEBROOT=" + $www)
+
+      - name: Start local HTTP server (python) in background
         shell: powershell
         run: |
-          # Genera una contraseña segura y crea/actualiza el usuario RDP
-          Add-Type -AssemblyName System.Security
-          $upper = [char[]](65..90)
-          $lower = [char[]](97..122)
-          $number = [char[]](48..57)
-          $special = ([char[]](33..47) + [char[]](58..64) + [char[]](91..96) + [char[]](123..126))
-          $raw = @()
-          $raw += $upper | Get-Random -Count 3
-          $raw += $lower | Get-Random -Count 3
-          $raw += $number | Get-Random -Count 3
-          $raw += $special | Get-Random -Count 3
-          $password = -join ($raw | Sort-Object { Get-Random })
-          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+          $www = $env:WEBROOT
+          if (-not $www) { Write-Error "WEBROOT not set"; exit 1 }
+          $log = Join-Path $env:TEMP "http-server.log"
+          if (Test-Path $log) { Remove-Item $log -Force -ErrorAction SilentlyContinue }
 
-          if (Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue) {
-            Set-LocalUser -Name "RDP" -Password $securePass
-            Write-Host "Updated existing user RDP password."
-          } else {
-            New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
-            Write-Host "Created user RDP."
+          Write-Host "Starting Python HTTP server serving $www on port 8080 ..."
+          # Start a background job that runs python -m http.server 8080 in that directory and redirects output to log
+          Start-Job -Name "http-server" -ScriptBlock {
+            param($site, $logPath)
+            Set-Location $site
+            # Ejecutar el servidor (stdout+stderr a logfile)
+            python -m http.server 8080 *>&1 | Out-File -FilePath $logPath -Encoding utf8 -Append
+          } -ArgumentList $www, $log | Out-Null
+
+          # Esperar un poco y comprobar que el job existe
+          Start-Sleep -Seconds 3
+          $job = Get-Job -Name "http-server" -ErrorAction SilentlyContinue
+          if (-not $job) {
+            Write-Error "No se pudo iniciar el servidor HTTP (job no encontrado). Revisa que python esté disponible."
+            exit 1
           }
+          Write-Host "HTTP server started as job id $($job.Id). Log: $log"
+          Add-Content -Path $env:GITHUB_ENV -Value ("HTTP_SERVER_LOG=" + $log)
 
-          Add-LocalGroupMember -Group "Administrators" -Member "RDP" -ErrorAction SilentlyContinue
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP" -ErrorAction SilentlyContinue
-
-          # Guardar contraseña en GITHUB_ENV (ten cuidado con compartir logs)
-          Add-Content -Path $env:GITHUB_ENV -Value ("RDP_PASSWORD=" + $password)
-          Write-Host "RDP password saved to GITHUB_ENV."
-
-      - name: Install cloudflared (Cloudflare Tunnel)
+      - name: Install cloudflared
         shell: powershell
         run: |
           $downloadUrl = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe"
@@ -64,43 +72,47 @@ jobs:
             exit 1
           }
           Write-Host "cloudflared installed to $exePath"
+          Add-Content -Path $env:GITHUB_ENV -Value ("CLOUDFLARED_EXE=" + $exePath)
 
-      - name: Launch ephemeral Cloudflare tunnel (background job)
+      - name: Launch cloudflared tunnel to http://localhost:8080 (background)
+        id: launch-tunnel
         shell: powershell
-        env:
-          GITHUB_RUN_ID: ${{ github.run_id }}
         run: |
-          $exe = Join-Path $env:ProgramFiles "cloudflared\cloudflared.exe"
-          if (-not (Test-Path $exe)) {
-            Write-Error "cloudflared not found at $exe"
+          $exe = $env:CLOUDFLARED_EXE
+          if (-not $exe -or -not (Test-Path $exe)) {
+            Write-Error "cloudflared executable not found at $exe"
             exit 1
           }
 
           $log = Join-Path $env:TEMP ("cloudflared-" + $env:GITHUB_RUN_ID + ".log")
           if (Test-Path $log) { Remove-Item $log -Force -ErrorAction SilentlyContinue }
 
-          Write-Host "Starting cloudflared tunnel to rdp://localhost:3389 in background job..."
-          # Usamos Start-Job para ejecutar cloudflared en background y redirigir salida al logfile
+          Write-Host "Starting cloudflared tunnel to http://localhost:8080 in background job..."
           Start-Job -Name "cf-tunnel-$($env:GITHUB_RUN_ID)" -ScriptBlock {
             param($exePath, $logPath)
-            & $exePath tunnel --url "rdp://localhost:3389" *>&1 | Out-File -FilePath $logPath -Encoding utf8 -Append
+            & $exePath tunnel --url "http://localhost:8080" *>&1 | Out-File -FilePath $logPath -Encoding utf8 -Append
           } -ArgumentList $exe, $log | Out-Null
 
-          # Esperar y leer el logfile buscando la URL pública trycloudflare.com
+          # Esperar y buscar la URL pública .trycloudflare.com en el logfile
           $tunnelUrl = $null
-          $maxTries = 60
+          $maxTries = 90        # más paciencia por si tarda en establecerse
           for ($i=0; $i -lt $maxTries; $i++) {
             if (Test-Path $log) {
               $txt = Get-Content $log -Raw -ErrorAction SilentlyContinue
               if ($txt) {
-                # Buscar trycloudflare o cualquier https URL
-                $m = [regex]::Match($txt, '(https?:\/\/[^\s"<>]+trycloudflare\.com[^\s"<>]*)', 'IgnoreCase')
+                # buscar una URL trycloudflare (o cualquier https) para mayor robustez
+                $m = [regex]::Match($txt, '(https?:\/\/[A-Za-z0-9\-\._]+\.trycloudflare\.com[^\s]*)', 'IgnoreCase')
                 if (-not $m.Success) {
                   $m = [regex]::Match($txt, '(https?:\/\/[^\s"<>]+)', 'IgnoreCase')
                 }
                 if ($m.Success) {
                   $tunnelUrl = $m.Groups[1].Value.Trim()
-                  break
+                  # Descartar enlaces claramente no relacionados (e.g., cloudflare docs)
+                  if ($tunnelUrl -match 'cloudflare\.com\/(website-terms|docs|privacy|legal)') {
+                    $tunnelUrl = $null
+                  } else {
+                    break
+                  }
                 }
               }
             }
@@ -108,43 +120,30 @@ jobs:
           }
 
           if (-not $tunnelUrl) {
-            Write-Host "--- Últimos 200 caracteres del logfile para debug ---"
-            if (Test-Path $log) { Get-Content $log -Tail 100 } else { Write-Host "No log found." }
-            Write-Error "No se detectó URL pública en la salida de cloudflared."
+            Write-Host "No se detectó URL pública en la salida de cloudflared. Últimas líneas del log:"
+            if (Test-Path $log) { Get-Content $log -Tail 200 } else { Write-Host "No log produced." }
+            Write-Error "Fallo al obtener URL pública del túnel."
             exit 1
           }
 
           Write-Host "Detected tunnel URL: $tunnelUrl"
-          Add-Content -Path $env:GITHUB_ENV -Value ("CLOUDFLARE_TUNNEL_URL=" + $tunnelUrl)
-
-          # Guardar id del job para debugging
+          Add-Content -Path $env:GITHUB_ENV -Value ("CLOUDFLARE_URL=" + $tunnelUrl)
+          # guardar id job para debug
           $job = Get-Job -Name "cf-tunnel-$($env:GITHUB_RUN_ID)" -ErrorAction SilentlyContinue
-          if ($job) {
-            Add-Content -Path $env:GITHUB_ENV -Value ("CLOUDFLARE_JOB_ID=" + $job.Id)
-            Write-Host "cloudflared launched as job id $($job.Id)"
-          }
+          if ($job) { Add-Content -Path $env:GITHUB_ENV -Value ("CLOUDFLARE_JOB_ID=" + $job.Id) }
 
-      - name: Verify local RDP listener
+      - name: Show connection info & keep alive
         shell: powershell
         run: |
-          Write-Host "Comprobando que RDP escucha en localhost:3389..."
-          $t = Test-NetConnection -ComputerName localhost -Port 3389 -WarningAction SilentlyContinue
-          if ($t.TcpTestSucceeded) {
-            Write-Host "Local RDP OK."
-          } else {
-            Write-Warning "No se pudo conectar a localhost:3389. RDP puede no estar listo, pero el túnel intentará conectar a esa dirección."
-          }
+          Write-Host "`n=== HTTP via Cloudflare Tunnel ==="
+          Write-Host "URL pública (abrir en navegador): $env:CLOUDFLARE_URL"
+          Write-Host "Servidor local: http://localhost:8080"
+          Write-Host "Contenido servido desde: $env:WEBROOT"
+          Write-Host "==================================="
 
-      - name: Show connection info & keep job alive
-        shell: powershell
-        run: |
-          Write-Host "=== RDP via Cloudflare Tunnel ==="
-          Write-Host "URL (abrir en navegador): $env:CLOUDFLARE_TUNNEL_URL"
-          Write-Host "Usuario: RDP"
-          Write-Host "Password: $env:RDP_PASSWORD"
-          Write-Host "================================="
-          # Mantener el runner activo para que el túnel siga funcionando
+          Write-Host "`n(Para cerrar el acceso: cancelar el workflow en GitHub Actions.)`n"
+
           while ($true) {
-            Write-Host "[$(Get-Date -Format o)] Tunnel active at $env:CLOUDFLARE_TUNNEL_URL"
+            Write-Host "[$(Get-Date -Format o)] Tunnel active at $env:CLOUDFLARE_URL"
             Start-Sleep -Seconds 300
           }
