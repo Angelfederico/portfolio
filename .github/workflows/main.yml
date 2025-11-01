@@ -1,4 +1,4 @@
-name: HTTP via Cloudflare Tunnel (Stable)
+name: HTTP via Cloudflare Tunnel (Fixed)
 
 on:
   workflow_dispatch:
@@ -23,24 +23,30 @@ jobs:
           </body></html>
           "@ | Out-File (Join-Path $webroot "index.html") -Encoding utf8
           Add-Content -Path $env:GITHUB_ENV -Value ("WEBROOT=" + $webroot)
+          Write-Host "Webroot creado en:" $webroot
 
       - name: Start local HTTP server
         shell: powershell
         run: |
           $www = $env:WEBROOT
+          if (-not $www) { Write-Error "WEBROOT no establecido"; exit 1 }
           $log = Join-Path $env:TEMP "http-server.log"
-          Write-Host "Starting HTTP server on port 8080..."
+          if (Test-Path $log) { Remove-Item $log -Force -ErrorAction SilentlyContinue }
+          Write-Host "Iniciando servidor HTTP en el puerto 8080..."
           Start-Job -Name "http" -ScriptBlock {
             param($dir,$logpath)
             Set-Location $dir
+            # Ejecuta el servidor; redirige salida a logfile
             python -m http.server 8080 *>&1 | Out-File -FilePath $logpath -Encoding utf8 -Append
           } -ArgumentList $www,$log | Out-Null
           Start-Sleep -Seconds 5
-          if (-not (Test-NetConnection -ComputerName localhost -Port 8080).TcpTestSucceeded) {
+          $conn = Test-NetConnection -ComputerName localhost -Port 8080 -WarningAction SilentlyContinue
+          if (-not $conn.TcpTestSucceeded) {
             Write-Error "El servidor HTTP no está escuchando en el puerto 8080"
+            if (Test-Path $log) { Write-Host "Últimas líneas del log HTTP:"; Get-Content $log -Tail 50 }
             exit 1
           }
-          Write-Host "HTTP server running OK."
+          Write-Host "Servidor HTTP arrancado correctamente."
           Add-Content -Path $env:GITHUB_ENV -Value ("HTTP_LOG=" + $log)
 
       - name: Install cloudflared
@@ -50,41 +56,72 @@ jobs:
           $path = Join-Path $env:ProgramFiles "cloudflared"
           New-Item -ItemType Directory -Force -Path $path | Out-Null
           $exe = Join-Path $path "cloudflared.exe"
-          Invoke-WebRequest -Uri $url -OutFile $exe -UseBasicParsing
+          Invoke-WebRequest -Uri $url -OutFile $exe -UseBasicParsing -ErrorAction Stop
+          if (-not (Test-Path $exe)) {
+            Write-Error "cloudflared no se pudo descargar"
+            exit 1
+          }
+          Write-Host "cloudflared instalado en:" $exe
           Add-Content -Path $env:GITHUB_ENV -Value ("CLOUDFLARED_EXE=" + $exe)
 
-      - name: Launch Cloudflare Tunnel
+      - name: Launch Cloudflare Tunnel (background)
         shell: powershell
         run: |
           $exe = $env:CLOUDFLARED_EXE
+          if (-not $exe -or -not (Test-Path $exe)) { Write-Error "cloudflared no encontrado"; exit 1 }
           $log = Join-Path $env:TEMP "cloudflared.log"
+          if (Test-Path $log) { Remove-Item $log -Force -ErrorAction SilentlyContinue }
+
+          Write-Host "Lanzando cloudflared tunnel a http://localhost:8080 en background..."
           Start-Job -Name "cf" -ScriptBlock {
-            param($exe,$log)
-            & $exe tunnel --url http://localhost:8080 *>&1 | Out-File -FilePath $log -Encoding utf8 -Append
+            param($exePath,$logPath)
+            & $exePath tunnel --url "http://localhost:8080" *>&1 | Out-File -FilePath $logPath -Encoding utf8 -Append
           } -ArgumentList $exe,$log | Out-Null
-          Write-Host "Waiting for tunnel URL..."
-          $url = $null
-          for ($i=0; $i -lt 60; $i++) {
+
+          Write-Host "Esperando la URL pública del túnel..."
+          $tunnelUrl = $null
+          $max = 90
+          for ($i=0; $i -lt $max; $i++) {
             if (Test-Path $log) {
               $txt = Get-Content $log -Raw -ErrorAction SilentlyContinue
-              $m = [regex]::Match($txt, '(https://[a-zA-Z0-9-]+\.trycloudflare\.com)', 'IgnoreCase')
-              if ($m.Success) { $url = $m.Groups[1].Value; break }
+              if ($txt) {
+                $m = [regex]::Match($txt, '(https?:\/\/[A-Za-z0-9\-]+\.trycloudflare\.com[^\s]*)', 'IgnoreCase')
+                if ($m.Success) {
+                  $candidate = $m.Groups[1].Value.Trim()
+                  # descartar enlaces obvios a docs/terms
+                  if ($candidate -notmatch 'cloudflare\.com\/(website-terms|docs|privacy|legal)') {
+                    $tunnelUrl = $candidate
+                    break
+                  }
+                }
+              }
             }
             Start-Sleep -Seconds 2
           }
-          if (-not $url) { Write-Error "No se detectó URL de túnel"; exit 1 }
-          Add-Content -Path $env:GITHUB_ENV -Value ("TUNNEL_URL=" + $url)
-          Write-Host "Tunnel URL: $url"
 
-      - name: Keep alive and show info
+          if (-not $tunnelUrl) {
+            Write-Host "No se detectó URL pública. Últimas líneas del log cloudflared:"
+            if (Test-Path $log) { Get-Content $log -Tail 200 } else { Write-Host "No se ha producido log aún." }
+            exit 1
+          }
+
+          Write-Host "Tunnel URL detectada:" $tunnelUrl
+          Add-Content -Path $env:GITHUB_ENV -Value ("TUNNEL_URL=" + $tunnelUrl)
+          # guardar job id para debug
+          $job = Get-Job -Name "cf" -ErrorAction SilentlyContinue
+          if ($job) { Add-Content -Path $env:GITHUB_ENV -Value ("CLOUDFLARED_JOB_ID=" + $job.Id) }
+
+      - name: Show info & keep alive
         shell: powershell
         run: |
-          Write-Host "=================================="
-          Write-Host "🌍 Tunnel URL: $env:TUNNEL_URL"
-          Write-Host "📂 Serving: $env:WEBROOT"
-          Write-Host "=================================="
-          Write-Host "Manteniendo el túnel activo..."
+          Write-Host "===================================="
+          Write-Host "Tunnel URL:" $env:TUNNEL_URL
+          Write-Host "Serving (local):" $env:WEBROOT
+          Write-Host "HTTP log:" $env:HTTP_LOG
+          Write-Host "cloudflared log: $env:TEMP\cloudflared.log"
+          Write-Host "===================================="
+          Write-Host "El túnel y servidor están activos. Para cerrarlo: cancelar el workflow."
           while ($true) {
+            Write-Host (Get-Date -Format "yyyy-MM-ddTHH:mm:ssK") " - still running..."
             Start-Sleep -Seconds 300
-            Write-Host "[$(Get-Date -Format T)] still running..."
           }
